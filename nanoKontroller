@@ -210,7 +210,7 @@ def get_audio_devices(pactl, sources=None, sinks=None):
     return audio_devices
 
 
-def parse_config(config_path, pactl, evdev, uinput, midi_out):
+def parse_config(pactl, evdev, uinput, midi_out, config_object):
     action_map = {}
     led_handler = nano_led_handler(port=midi_out)
 
@@ -316,13 +316,21 @@ if args.list_devices:
 # Open the uinput object for sending fake keypresses
 ui = uinput.UInput()
 
-# Open the MIDI objects for the nanKONTROL2 device
-inport = mido.open_input('nanoKONTROL2 MIDI 1')
-outport = mido.open_output('nanoKONTROL2 MIDI 1')
-
 # Get config
-logging.debug('Trying to load config from {}'.format(args.config))
-action_map = parse_config(args.config, pactl, e, ui, outport)
+logging.debug(f'Trying to load config from {args.config}')
+config_object = configparser.ConfigParser()
+config_object.optionxform = str  # Need case sensitivity
+
+if len(config_object.read(args.config)) == 0:
+    logging.error(f'parse_config: Failed to load config file {args.config}')
+
+# Open the MIDI objects for the nanKONTROL2 device
+dev_name = config_object.get('general', 'nanoKONTROLName')
+inport = mido.open_input(dev_name)
+outport = mido.open_output(dev_name)
+
+# Build the actionmap
+action_map = parse_config(pactl, e, ui, outport, config_object)
 
 # Main loop
 for msg in inport:
