@@ -174,18 +174,18 @@ class nano_action_mute(nano_action):
 
 # noinspection PyPep8Naming
 class nano_action_program_mute(nano_action):
-    def __init__(self, program_name=None, pactl=None, led_handler=None, led_mode=None):
-        self.program_name = program_name
+    def __init__(self, programs=None, pactl=None, led_handler=None, led_mode=None):
+        self.programs = programs
         self.pactl = pactl
         self.led_handler = led_handler
         self.led_mode = led_mode
 
     def action(self, key=None, value=None):
-        logging.debug(f'nano_action_program_mute::action: Value {value} for {self.program_name}')
+        logging.debug(f'nano_action_program_mute::action: Value {value} for {self.programs}')
         # get all the program sinks for the program name
         for sink_input in pactl.sink_input_list():
             if 'application.name' in sink_input.proplist and \
-                    sink_input.proplist['application.name'] == self.program_name:
+                    sink_input.proplist['application.name'] in self.programs:
                 # led mode toggle, check what the mute on nanoKontrol is and set the audio device accordingly
                 if self.led_mode == 'toggle':
                     muted = value > 0
@@ -217,16 +217,16 @@ class nano_action_volume(nano_action):
 
 # noinspection PyPep8Naming
 class nano_action_program_volume(nano_action):
-    def __init__(self, program_name=None, pactl=None, max_level=100.0):
-        self.program_name = program_name
+    def __init__(self, programs=None, pactl=None, max_level=100.0):
+        self.programs = programs
         self.pactl = pactl
         self.max_level = max_level
 
     def action(self, key=None, value=None):
-        logging.debug(f'nano_action_program_volume::action: Value {value} for {self.program_name}')
+        logging.debug(f'nano_action_program_volume::action: Value {value} for {self.programs}')
         for sink_input in pactl.sink_input_list():
             if 'application.name' in sink_input.proplist and \
-                    sink_input.proplist['application.name'] == self.program_name:
+                    sink_input.proplist['application.name'] in self.programs:
                 pactl.volume_set_all_chans(sink_input, ((float(value) / 127.0) * (float(self.max_level) / 100.0)))
 
 
@@ -315,11 +315,12 @@ def parse_config(pactl, evdev, uinput, midi_out, config_object):
             if actions[0] == 'mute':
                 # Toggle mute of audio device
                 action_map[keycode] = nano_action_mute(audio_device=audio_devices[actions[1]], pactl=pactl,
-                                                       led_handler=led_handler)
+                                                       led_handler=led_handler, led_mode=led_mode)
 
             elif actions[0] == 'program-mute':
                 # Toggle mute of program
-                action_map[keycode] = nano_action_program_mute(program_name=applications[actions[1]], pactl=pactl,
+                programs = [applications[x] for x in actions[1].split(',')]
+                action_map[keycode] = nano_action_program_mute(programs=programs, pactl=pactl,
                                                                led_handler=led_handler, led_mode=led_mode)
 
             elif actions[0] == 'volume':
@@ -337,15 +338,15 @@ def parse_config(pactl, evdev, uinput, midi_out, config_object):
             elif actions[0] == 'program-volume':
                 # Change volume of program
                 volume_details = actions[1].split('/', 1)
+                programs = [applications[x] for x in volume_details[0].split(',')]
 
                 if len(volume_details) == 1:
                     # No max volume override
-                    action_map[keycode] = nano_action_program_volume(program_name=applications[volume_details[0]],
-                                                                     pactl=pactl)
+                    action_map[keycode] = nano_action_program_volume(programs=programs, pactl=pactl)
                 else:
                     # Max volume override
-                    action_map[keycode] = nano_action_program_volume(program_name=applications[volume_details[0]],
-                                                                     pactl=pactl, max_level=float(volume_details[1]))
+                    action_map[keycode] = nano_action_program_volume(programs=programs, pactl=pactl,
+                                                                     max_level=float(volume_details[1]))
 
             elif actions[0] == 'exec':
                 # Execute a command
