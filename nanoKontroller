@@ -1,6 +1,8 @@
 #!/usr/bin/python3
 
 import argparse
+import re
+
 import mido
 import logging
 import configparser
@@ -406,18 +408,38 @@ if len(config_object.read(args.config)) == 0:
     logging.error(f'parse_config: Failed to load config file {args.config}')
 
 # Open the MIDI objects for the nanKONTROL2 device
-dev_name = config_object.get('general', 'nanoKONTROLName')
-inport = mido.open_input(dev_name)
-outport = mido.open_output(dev_name)
+pattern = re.compile(config_object.get('general', 'nanoKONTROLPattern', fallback='nanoKONTROL2'))
+inport = None
+for input_dev in mido.get_input_names():
+    if pattern.search(input_dev):
+        logging.info('found input device: {}'.format(input_dev))
+        inport = mido.open_input(input_dev)
+        break
+
+if inport is None:
+    print('nanoKONTROL2 input device not found, exiting.')
+    exit(1)
+
+outport = None
+for output in mido.get_output_names():
+    if pattern.search(output):
+        logging.info('found output device: {}'.format(output))
+        outport = mido.open_output(output)
+        break
+
+if outport is None:
+    print('nanoKONTROL2 output device not found, exiting.')
+    exit(1)
 
 # Build the actionmap
 action_map = parse_config(pactl, e, ui, outport, config_object)
 
 # Main loop
+logging.info('Starting MIDI message listener')
 for msg in inport:
     if msg.type == 'control_change':
-        logging.debug('Keypress {} value {}'.format(msg.control, msg.value))
+        logging.info('Keypress {} value {}'.format(msg.control, msg.value))
         if msg.control in action_map.keys():
             action_map[msg.control].action(key=msg.control, value=msg.value)
     else:
-        logging.debug('Got other message, type {}'.format(msg.type))
+        logging.info('Got other message, type {}'.format(msg.type))
