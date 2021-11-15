@@ -363,6 +363,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument('-d', '--debug', action='store_true', help='Enable debug output')
 parser.add_argument('-c', '--config', default=expanduser('~/.config/nanoKontroller.ini'), help='Path to config file')
 parser.add_argument('-l', '--list-devices', action='store_true', help='List all PulseAudio devices')
+parser.add_argument('-p', '--list-programs', action='store_true', help='List all programs that currently send audio '
+                                                                       'via PulseAudio')
 args = parser.parse_args()
 
 # Setup logging
@@ -377,12 +379,19 @@ logging.debug('Starting up')
 logging.debug('Opening PulseAudio')
 pactl = Pulse('nanoKontroller')
 
-# It the user just wanted a list of PA devices, dump them and move on
+# If the user just wanted a list of PA devices, dump them and move on
 if args.list_devices:
     for device in pactl.sink_list():
         print(f'output: {device.name}')
     for device in pactl.source_list():
         print(f'input: {device.name}')
+    sys.exit(0)
+
+# If the user just wanted the currently playing audio sources, dump them and exit
+if args.list_programs:
+    for program in pactl.sink_input_list():
+        if 'application.name' in program.proplist:
+            print(f'program: {program.proplist["application.name"]}')
     sys.exit(0)
 
 # Open the uinput object for sending fake keypresses
