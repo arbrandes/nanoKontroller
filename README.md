@@ -26,9 +26,9 @@ Requires
 
 Config
 ======
-By default config should be in ```~/.config/nanoKontroller.ini``` but this can be overridden by the ```-c```/```--config``` command line argument.
+By default, config should be in ```~/.config/nanoKontroller.ini``` but this can be overridden by the ```-c```/```--config``` command line argument.
 
-The ```[general]``` section sets the name of the nanoKontrol MIDI device and the led mode (are they on ```toggle``` or ```default``` behaviour when you press them? This can be changed in the Korg Windows Software).
+The ```[general]``` section sets the name pattern of the nanoKontrol MIDI device and the LED mode (are they on ```toggle``` or ```default``` behaviour when you press them? This can be changed in the Korg Windows Software). The script will search for a MIDI devices that matches the specified pattern and take the first one.
 
 The ```[audioinputs]``` section defines audio devices to use as inputs, such as headsets or microphones. Similarly, ```[audiooutputs]``` defines audio devices to use as outputs, such as headsets or speakers. To help finding these names there is a ```--list-devices``` command line option to print them to the console.
 
@@ -53,7 +53,7 @@ Example Config
 ==============
 ```
 [general]
-nanoKONTROLName = nanoKONTROL2:nanoKONTROL2 nanoKONTROL2 _ CTR 24:0
+nanoKONTROLPattern = nanoKONTROL2
 ledMode = toggle
 
 [audioinputs]
