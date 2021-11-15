@@ -438,8 +438,8 @@ action_map = parse_config(pactl, e, ui, outport, config_object)
 logging.info('Starting MIDI message listener')
 for msg in inport:
     if msg.type == 'control_change':
-        logging.debug('Keypress {} value {}'.format(msg.control, msg.value))
+        logging.info('Keypress {} value {}'.format(msg.control, msg.value))
         if msg.control in action_map.keys():
             action_map[msg.control].action(key=msg.control, value=msg.value)
     else:
-        logging.debug('Got other message, type {}'.format(msg.type))
+        logging.info('Got other message, type {}'.format(msg.type))
