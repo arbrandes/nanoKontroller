@@ -2,6 +2,7 @@
 
 import argparse
 import re
+import shlex
 
 import mido
 import logging
@@ -240,7 +241,8 @@ class nano_action_exec(nano_action):
     def action(self, key=None, value=None):
         filled_command = self.command.format(NK_KEY_ID=key, NK_KEY_VALUE=value)
         logging.debug('nano_action_exec::action: Executing {}'.format(filled_command))
-        subprocess.call(filled_command, shell=True)
+        process_args = shlex.split(filled_command)
+        subprocess.Popen(process_args)
 
 
 def get_audio_devices(pactl, sources=None, sinks=None):
