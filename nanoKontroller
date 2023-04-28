@@ -244,6 +244,65 @@ class nano_action_exec(nano_action):
         subprocess.Popen(process_args)
 
 
+# noinspection PyPep8Naming
+class nano_action_default_sink(nano_action):
+    def __init__(self, sink=None, pactl=None, led_handler=None):
+        self.default_sink = sink
+        self.pactl = pactl
+        self.led_handler = led_handler
+
+    def action(self, key=None, value=None):
+        logging.debug(f'nano_action_default_sink::action: Value {value} for {self.default_sink.name}')
+        if value == 127:
+            self.pactl.default_set(self.default_sink)
+            self.led_handler.set_led(led=key, value=1)
+
+            # Reset other leds
+            for led, action_object in action_map.items():
+                try:
+                    action_object.default_sink
+                except:
+                    pass
+                else:
+                    if action_object.default_sink.name != self.default_sink.name:
+                        self.led_handler.set_led(led, value=0)
+
+
+# noinspection PyPep8Naming
+class nano_action_cycle_default_sink(nano_action):
+    def __init__(self, sinks, pactl=None, led_handler=None):
+        self.default_sinks = sinks
+        self.pactl = pactl
+        self.led_handler = led_handler
+
+    def action(self, key=None, value=None):
+        logging.debug(f'nano_action_cycle_default_sink::action: Value {value} for {self.default_sinks}')
+        if value == 127:
+            default_sink_name = pactl.server_info().default_sink_name
+            iter_sinks = iter(self.default_sinks)
+            try:
+                current_sink = next(s for s in iter_sinks if s.name == default_sink_name)
+            except StopIteration:
+                next_sink = self.default_sinks[0]
+            else:
+                try:
+                    next_sink = next(iter_sinks)
+                except StopIteration:
+                    next_sink = self.default_sinks[0]
+
+            self.pactl.default_set(next_sink)
+
+            # Set leds
+            for led, action_object in action_map.items():
+                try:
+                    action_object.default_sink
+                except:
+                    pass
+                else:
+                    is_default = action_object.default_sink.name == next_sink.name
+                    self.led_handler.set_led(led, value=is_default)
+
+
 def get_audio_devices(pactl, sources=None, sinks=None):
     if sinks is None:
         sinks = {}
@@ -290,6 +349,9 @@ def parse_config(pactl, evdev, uinput, midi_out, config_object):
 
     # Get PulseAudio objects for all sinks and sources
     audio_devices = get_audio_devices(pactl, sources=sources, sinks=sinks)
+
+    # The current default sync
+    default_sink_name = pactl.server_info().default_sink_name
 
     # Reset leds
     for led in nano_keys.led_support.value:
@@ -346,9 +408,7 @@ def parse_config(pactl, evdev, uinput, midi_out, config_object):
 
                 if 0 <= keycode <= 7:
                     solo_key = keycode + 32
-                    record_key = keycode + 64
                     led_handler.set_led(led=solo_key, value=1)
-                    led_handler.set_led(led=record_key, value=1)
 
             elif actions[0] == 'program-volume':
                 # Change volume of program
@@ -362,6 +422,19 @@ def parse_config(pactl, evdev, uinput, midi_out, config_object):
                     # Max volume override
                     action_map[keycode] = nano_action_program_volume(programs=programs, pactl=pactl,
                                                                      max_level=float(volume_details[1]))
+
+            elif actions[0] == 'default-sink':
+                # Set default sink
+                sink = audio_devices[actions[1]]
+                action_map[keycode] = nano_action_default_sink(sink=sink, pactl=pactl, led_handler=led_handler)
+                if sink.name == default_sink_name:
+                    led_handler.set_led(led=keycode, value=1)
+
+            elif actions[0] == 'cycle-default-sink':
+                # Cycle between default sinks
+                sinks = [audio_devices[x] for x in actions[1].split(',')]
+                action_map[keycode] = nano_action_cycle_default_sink(sinks, pactl, led_handler)
+                led_handler.set_led(led=keycode, value=1)
 
             elif actions[0] == 'exec':
                 # Execute a command

@@ -40,6 +40,8 @@ Bare options such as ```KEY_PLAYPAUSE``` are taken directly from evdev as a fake
 
 Options prefixed with ```mute``` such as ```mute/mainOutput``` are used to tie a button to mute an audio device. In this case, the device ```mainOutput``` which maps to ```alsa_output.usb-0d8c_Generic_USB_Audio_Device-00.iec958-stereo```
 
+Options prefixed with ```default-sink``` such as ```default-sink/mainOutput``` are used to tie a button to set an audio device as the default sink. In this case, the device ```mainOutput```, which maps to ```alsa_output.usb-0d8c_Generic_USB_Audio_Device-00.iec958-stereo```.
+
 Options prefixed with ```program-mute``` such as ```program-mute/chrome``` are used to tie a button to mute a program. In this case, the program ```chrome``` which maps to ```Google Chrome```. This option supports muting multiple programs, just list them as a comma-separated list: ```program-mute/spotify,media_player```
 
 Options prefixed with ```volume``` such as ```volume/mainOutput``` are used to tie a slider or knob to the volume of an audio device, in this case the device ```mainOutput```. An optional third argument can be supplied like ```volume/mainOutput/80``` to limit the maximum volume to 80% or ```volume/mainOutput/150``` to boost the maximum volume to 150%.
@@ -47,6 +49,8 @@ Options prefixed with ```volume``` such as ```volume/mainOutput``` are used to t
 Options prefixed with ```program-volume``` such as ```program-volume/chrome``` are used to tie a slider or knob to the volume of a program, in this case the device ```chrome```. An optional third argument can be supplied like ```volume/chrome/80``` to limit the maximum volume to 80% or ```volume/chrome/150``` to boost the maximum volume to 150%. This option supports changing the volume for multiple programs, just list them as a comma-separated list: ```program-volume/spotify,media_player```
 
 Options prefixed with ```exec``` are used to tie a button to executing a shell command. The values ```{NK_KEY_ID}``` and ```{NK_KEY_VALUE}``` are substituted by the device key ID number and the value (0 for button release, 127 for button press).
+
+Options prefixed with ```cycle-default-sink``` such as ```cycle-default-sink/mainOutput,headsetOutput``` are used to tie a button to cycle between the specified audio devices as the default sink.  It is possible to specify more than two devices.
 
 
 Example Config
@@ -74,10 +78,13 @@ PREV = KEY_PREVIOUSSONG
 NEXT = KEY_NEXTSONG
 STOP = KEY_STOPCD
 RECORD = KEY_RECORD
+CYCLE = cycle-default-sink/mainOutput,headsetOutput
 PARAM1_SLIDER = volume/mainOutput
 PARAM1_MUTE = mute/mainOutput
+PARAM1_RECORD = default-sink/mainOutput
 PARAM2_SLIDER = volume/headsetOutput/150
 PARAM2_MUTE = mute/headsetInput
+PARAM2_RECORD = default-sink/headsetOutput
 PARAM3_SOLO = exec/echo "Key {NK_KEY_ID}, value {NK_KEY_VALUE}"
 PARAM4_SLIDER = program-volume/spotify,media_player
 PARAM4_MUTE = program-mute/spotify,media_player
