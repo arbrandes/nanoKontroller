@@ -26,7 +26,7 @@ Requires
 * accessible uinput
 
 ```bash
-apt install python3-dev
+apt install python3-dev libasound2-dev
 pip install evdev pulsectl mido python-rtmidi
 echo 'uinput' | sudo tee /etc/modules-load.d/uinput.conf
 sudo cp 50-uinput.rules /etc/udev/rules.d/
