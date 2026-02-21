@@ -1,0 +1,9 @@
+post_install() {
+  echo ">>> You should be in the 'input' group to use nanoKontroller."
+  echo ">>> Run: sudo usermod -aG input <your_username>"
+  echo ">>> You may also need to reboot or reload udev for the uinput permissions to take effect."
+}
+
+post_upgrade() {
+  post_install
+}

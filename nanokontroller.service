@@ -1,0 +1,11 @@
+[Unit]
+Description=nanoKONTROL2 user action mapper
+After=pulseaudio.service
+
+[Service]
+ExecStart=/usr/bin/nanoKontroller
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
