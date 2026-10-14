@@ -16,6 +16,7 @@ Features
 * Maps sliders or knobs to the volume of any audio device, including support for volume limiting or overdrive
 * Maps any button to the mute control for any audio device
 * Maps any button to an external shell command that includes the device key and value
+* Recovers on its own after suspend/resume, and exits for systemd to restart it if the device is unplugged
 
 Requires
 ========

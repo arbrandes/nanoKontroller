@@ -114,12 +114,15 @@ class nano_keys(Enum):
 class nano_led_handler(object):
     def __init__(self, port=None):
         self.port = port
-        # set_led is called from both the MIDI thread and the DeviceMonitor thread
+        self.state = {}  # led -> last value sent, so it can be replayed
+        # set_led is called from the MIDI, DeviceMonitor and watchdog threads
         self.lock = threading.Lock()
 
+    def set_port(self, port):
+        with self.lock:
+            self.port = port
+
     def set_led(self, led=None, value=None):
-        if self.port is None:
-            return
         if led in nano_keys.led_support.value:
             logging.debug(
                 "nano_led_handler::set: Setting led {} to {}".format(led, value)
@@ -129,11 +132,21 @@ class nano_led_handler(object):
             else:
                 value = 0
             with self.lock:
-                self.port.send(
-                    mido.Message("control_change", control=led, value=value)
-                )
+                self.state[led] = value
+                if self.port is not None:
+                    self.port.send(
+                        mido.Message("control_change", control=led, value=value)
+                    )
         else:
             logging.debug("nano_led_handler::set: Key {} has no led to set".format(led))
+
+    def refresh(self):
+        """Resend every known LED state, e.g. after the device lost power."""
+        with self.lock:
+            if self.port is None:
+                return
+            for led, value in self.state.items():
+                self.port.send(mido.Message("control_change", control=led, value=value))
 
 
 # noinspection PyPep8Naming
@@ -195,6 +208,9 @@ class nano_action_mute(nano_action):
         try:
             if self.led_mode == "toggle":
                 self.muted = value > 0
+                # The device already toggled its own LED; record the state so
+                # it can be replayed if the device loses power
+                self.led_handler.set_led(led=key, value=self.muted)
                 self.pactl.mute(self.audio_device, self.muted)
             elif self.led_mode == "default":
                 if value == 127:
@@ -224,6 +240,7 @@ class nano_action_program_mute(nano_action):
                     and sink_input.proplist["application.name"] in self.programs
                 ):
                     if self.led_mode == "toggle":
+                        self.led_handler.set_led(led=key, value=value > 0)
                         self.pactl.mute(sink_input, value > 0)
                     elif self.led_mode == "default":
                         muted = 0 if sink_input.mute else 1
@@ -755,52 +772,114 @@ if len(config_object.read(args.config)) == 0:
     logging.error(f"Failed to load config file {args.config}")
     sys.exit(1)
 
-# Open the MIDI objects for the nanKONTROL2 device
+# Open the MIDI objects for the nanoKONTROL2 device
 pattern = re.compile(
     config_object.get("general", "nanoKONTROLPattern", fallback="nanoKONTROL2")
 )
-inport = None
-for input_dev in mido.get_input_names():
-    if pattern.search(input_dev):
-        logging.info("found input device: {}".format(input_dev))
-        inport = mido.open_input(input_dev)
-        break
 
+# The action map is filled in by parse_config once the output port is open;
+# messages arriving before that are ignored
+action_map = {}
+
+
+def on_midi_message(msg):
+    """Called from the rtmidi input thread for every incoming message."""
+    if msg.type != "control_change":
+        logging.debug("Got other message, type {}".format(msg.type))
+        return
+    logging.debug("Keypress {} value {}".format(msg.control, msg.value))
+    action = action_map.get(msg.control)
+    if action is None:
+        return
+    try:
+        action.action(key=msg.control, value=msg.value)
+    except Exception as ex:
+        logging.error(f"Action for key {msg.control} failed: {ex}")
+
+
+def midi_device_present(pattern):
+    return any(pattern.search(name) for name in mido.get_input_names())
+
+
+def open_midi_ports(pattern, callback):
+    """Open the first input and output ports matching pattern, or (None, None)."""
+    inport = None
+    outport = None
+    for name in mido.get_input_names():
+        if pattern.search(name):
+            logging.info("found input device: {}".format(name))
+            inport = mido.open_input(name, callback=callback)
+            break
+    for name in mido.get_output_names():
+        if pattern.search(name):
+            logging.info("found output device: {}".format(name))
+            outport = mido.open_output(name)
+            break
+    if inport is None or outport is None:
+        logging.error("nanoKONTROL2 input or output device not found")
+        close_midi_ports(inport, outport)
+        return None, None
+    return inport, outport
+
+
+def close_midi_ports(*ports):
+    for port in ports:
+        if port is not None:
+            try:
+                port.close()
+            except Exception as ex:
+                logging.debug(f"Error closing MIDI port: {ex}")
+
+
+inport, outport = open_midi_ports(pattern, on_midi_message)
 if inport is None:
-    logging.error("nanoKONTROL2 input device not found, exiting.")
-    sys.exit(1)
-
-outport = None
-for output in mido.get_output_names():
-    if pattern.search(output):
-        logging.info("found output device: {}".format(output))
-        outport = mido.open_output(output)
-        break
-
-if outport is None:
-    logging.error("nanoKONTROL2 output device not found, exiting.")
     sys.exit(1)
 
 # Initialize DeviceMonitor
 device_monitor = DeviceMonitor(led_handler=None)  # led_handler set in parse_config
 
 # Build the actionmap
-action_map = parse_config(pactl, e, ui, outport, config_object, device_monitor)
-if action_map is None:
+parsed_map = parse_config(pactl, e, ui, outport, config_object, device_monitor)
+if parsed_map is None:
     sys.exit(1)
+action_map.update(parsed_map)
+led_handler = device_monitor.led_handler
 
 # Start monitor
 device_monitor.start()
 
-# Main loop
+# Watchdog loop. MIDI messages are handled on the rtmidi thread; this thread
+# only checks that the device is still there and that we didn't just resume
+# from suspend, after which the input stream has been observed to go silent
+# until the ports are reopened.
+WATCHDOG_INTERVAL = 3  # seconds between checks
+SUSPEND_THRESHOLD = 5  # extra seconds of wall-clock skew that mean we slept
+
 logging.info("Starting MIDI message listener")
+last_tick = time.clock_gettime(time.CLOCK_BOOTTIME)
 try:
-    for msg in inport:
-        if msg.type == "control_change":
-            logging.debug("Keypress {} value {}".format(msg.control, msg.value))
-            if msg.control in action_map.keys():
-                action_map[msg.control].action(key=msg.control, value=msg.value)
-        else:
-            logging.debug("Got other message, type {}".format(msg.type))
+    while True:
+        time.sleep(WATCHDOG_INTERVAL)
+        # CLOCK_BOOTTIME keeps counting during suspend while sleep() does not,
+        # so a tick that took much longer than expected means we were suspended
+        now = time.clock_gettime(time.CLOCK_BOOTTIME)
+        resumed = now - last_tick > WATCHDOG_INTERVAL + SUSPEND_THRESHOLD
+        last_tick = now
+
+        if not midi_device_present(pattern):
+            # Let systemd restart us once the device is back
+            logging.error("nanoKONTROL2 device disappeared, exiting.")
+            sys.exit(1)
+
+        if resumed:
+            logging.info("Resume from suspend detected, reopening MIDI ports")
+            close_midi_ports(inport, outport)
+            inport, outport = open_midi_ports(pattern, on_midi_message)
+            if inport is None:
+                sys.exit(1)
+            led_handler.set_port(outport)
+            led_handler.refresh()
 except KeyboardInterrupt:
     logging.info("Stopping...")
+finally:
+    close_midi_ports(inport, outport)
