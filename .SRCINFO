@@ -1,6 +1,6 @@
 pkgbase = nanokontroller-git
 	pkgdesc = Python app to turn the controllers on a Korg nanoKONTROL2 device into user actions on Linux
-	pkgver = 0.1.0.r20.f5d08f7
+	pkgver = 0.1.0.r26.d80f95b
 	pkgrel = 1
 	url = https://github.com/arbrandes/nanoKontroller
 	install = nanokontroller.install
@@ -12,7 +12,6 @@ pkgbase = nanokontroller-git
 	depends = python-pulsectl
 	depends = python-mido
 	depends = python-rtmidi
-	depends = alsa-lib
 	provides = nanokontroller
 	conflicts = nanokontroller
 	source = nanokontroller::git+https://github.com/arbrandes/nanoKontroller.git

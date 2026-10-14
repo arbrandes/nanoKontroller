@@ -114,6 +114,8 @@ class nano_keys(Enum):
 class nano_led_handler(object):
     def __init__(self, port=None):
         self.port = port
+        # set_led is called from both the MIDI thread and the DeviceMonitor thread
+        self.lock = threading.Lock()
 
     def set_led(self, led=None, value=None):
         if self.port is None:
@@ -126,7 +128,10 @@ class nano_led_handler(object):
                 value = 127
             else:
                 value = 0
-            self.port.send(mido.Message("control_change", control=led, value=value))
+            with self.lock:
+                self.port.send(
+                    mido.Message("control_change", control=led, value=value)
+                )
         else:
             logging.debug("nano_led_handler::set: Key {} has no led to set".format(led))
 
@@ -156,23 +161,30 @@ class nano_action_evdev(nano_action):
                 key, value, self.evdev_action
             )
         )
-        self.uinput.write(e.EV_KEY, self.evdev_action, int(value / 126))
+        self.uinput.write(e.EV_KEY, self.evdev_action, 1 if value > 0 else 0)
         self.uinput.syn()
 
 
 # noinspection PyPep8Naming
 class nano_action_mute(nano_action):
-    def __init__(self, audio_device=None, pactl=None, led_handler=None, led_mode=None):
+    def __init__(
+        self, audio_device=None, pactl=None, led_handler=None, led_mode=None, key=None
+    ):
         self.audio_device = audio_device
         self.pactl = pactl
         self.muted = audio_device.mute if audio_device else 0
         self.led_handler = led_handler
         self.led_mode = led_mode
+        self.key = key
 
     def set_device(self, device):
         self.audio_device = device
         if device:
             self.muted = device.mute
+            # In toggle mode the device manages its own LED state, so only sync
+            # the LED with external mute changes in default mode
+            if self.led_mode == "default" and self.key is not None:
+                self.led_handler.set_led(led=self.key, value=self.muted)
 
     def action(self, key=None, value=None):
         if not self.audio_device:
@@ -206,7 +218,7 @@ class nano_action_program_mute(nano_action):
             f"nano_action_program_mute::action: Value {value} for {self.programs}"
         )
         try:
-            for sink_input in pactl.sink_input_list():
+            for sink_input in self.pactl.sink_input_list():
                 if (
                     "application.name" in sink_input.proplist
                     and sink_input.proplist["application.name"] in self.programs
@@ -262,12 +274,12 @@ class nano_action_program_volume(nano_action):
             f"nano_action_program_volume::action: Value {value} for {self.programs}"
         )
         try:
-            for sink_input in pactl.sink_input_list():
+            for sink_input in self.pactl.sink_input_list():
                 if (
                     "application.name" in sink_input.proplist
                     and sink_input.proplist["application.name"] in self.programs
                 ):
-                    pactl.volume_set_all_chans(
+                    self.pactl.volume_set_all_chans(
                         sink_input,
                         ((float(value) / 127.0) * (float(self.max_level) / 100.0)),
                     )
@@ -298,23 +310,10 @@ class nano_action_default_sink(nano_action):
         self.key = key
 
     def set_device(self, device):
+        # The LED is kept in sync by DeviceMonitor via handle_default_sink_change
         self.default_sink = device
-        if self.key is not None:
-            if device:
-                try:
-                    # Use a temporary connection to avoid threading issues with the main pactl instance
-                    with Pulse("nanoKontroller-check-default") as temp_pulse:
-                        info = temp_pulse.server_info()
-                        if device.name == info.default_sink_name:
-                            self.led_handler.set_led(led=self.key, value=1)
-                        else:
-                            self.led_handler.set_led(led=self.key, value=0)
-                except Exception as e:
-                    logging.error(
-                        f"nano_action_default_sink::set_device: Failed to check default sink: {e}"
-                    )
-            else:
-                self.led_handler.set_led(led=self.key, value=0)
+        if device is None and self.key is not None:
+            self.led_handler.set_led(led=self.key, value=0)
 
     def handle_default_sink_change(self, default_sink_name):
         if self.key is not None and self.default_sink:
@@ -329,27 +328,25 @@ class nano_action_default_sink(nano_action):
         )
         if value == 127:
             try:
+                # The resulting server event makes DeviceMonitor update the LEDs
+                # of every default-sink action, including this one
                 self.pactl.default_set(self.default_sink)
-                self.led_handler.set_led(led=key, value=1)
-
-                # Reset other leds
-                if "action_map" in globals():
-                    for led, action_object in globals()["action_map"].items():
-                        try:
-                            action_object.default_sink
-                        except:
-                            pass
-                        else:
-                            if (
-                                action_object.default_sink
-                                and action_object.default_sink.name
-                                != self.default_sink.name
-                            ):
-                                self.led_handler.set_led(led, value=0)
             except Exception as e:
                 logging.error(
                     f"nano_action_default_sink::action: Failed to set default sink: {e}"
                 )
+
+
+# noinspection PyPep8Naming
+class nano_sink_slot(object):
+    """Lets DeviceMonitor update one entry of a cycle action's sink list."""
+
+    def __init__(self, action, index):
+        self.action = action
+        self.index = index
+
+    def set_device(self, device):
+        self.action.default_sinks[self.index] = device
 
 
 # noinspection PyPep8Naming
@@ -368,12 +365,10 @@ class nano_action_cycle_default_sink(nano_action):
         logging.debug(f"nano_action_cycle_default_sink::action: Value {value}")
         if value == 127:
             try:
-                default_sink_name = pactl.server_info().default_sink_name
+                default_sink_name = self.pactl.server_info().default_sink_name
                 iter_sinks = iter(valid_sinks)
                 try:
-                    current_sink = next(
-                        s for s in iter_sinks if s.name == default_sink_name
-                    )
+                    next(s for s in iter_sinks if s.name == default_sink_name)
                 except StopIteration:
                     next_sink = valid_sinks[0]
                 else:
@@ -382,21 +377,9 @@ class nano_action_cycle_default_sink(nano_action):
                     except StopIteration:
                         next_sink = valid_sinks[0]
 
+                # The resulting server event makes DeviceMonitor update the LEDs
+                # of every default-sink action
                 self.pactl.default_set(next_sink)
-
-                # Set leds
-                if "action_map" in globals():
-                    for led, action_object in globals()["action_map"].items():
-                        try:
-                            action_object.default_sink
-                        except:
-                            pass
-                        else:
-                            if action_object.default_sink:
-                                is_default = (
-                                    action_object.default_sink.name == next_sink.name
-                                )
-                                self.led_handler.set_led(led, value=is_default)
             except Exception as e:
                 logging.error(
                     f"nano_action_cycle_default_sink::action: Failed to cycle default sink: {e}"
@@ -408,6 +391,9 @@ class DeviceMonitor:
         self.led_handler = led_handler
         self.watched_devices = {}  # pa_name -> list of {'action': action_obj, 'solo_key': int}
         self.indices = {"sink": {}, "source": {}}  # facility -> index -> name
+        self.present = set()  # pa_names of watched devices currently connected
+        self.default_sink_name = None
+        self.fetch_pulse = None  # Secondary connection for queries from the callback
         self.lock = threading.Lock()
         self.started = False
 
@@ -428,15 +414,22 @@ class DeviceMonitor:
     def _run(self):
         while True:
             try:
-                with Pulse("nanoKontroller-monitor") as pulse:
-                    # Initial scan to populate index_to_name and update devices
+                # The listening connection can't be queried from inside its own
+                # event callback, so keep a second one open for that
+                with Pulse("nanoKontroller-monitor") as pulse, Pulse(
+                    "nanoKontroller-monitor-fetch"
+                ) as fetch_pulse:
+                    self.fetch_pulse = fetch_pulse
+
+                    # Initial check of default sink, before the device scan so
+                    # default-sink LEDs are correct from the start
+                    self._handle_server_change(pulse)
+
+                    # Initial scan to populate indices and update devices
                     for sink in pulse.sink_list():
                         self._handle_new_or_change(sink, "sink")
                     for source in pulse.source_list():
                         self._handle_new_or_change(source, "source")
-
-                    # Initial check of default sink
-                    self._handle_server_change(pulse)
 
                     pulse.event_mask_set("sink", "source", "server")
                     pulse.event_callback_set(self._callback)
@@ -445,31 +438,27 @@ class DeviceMonitor:
                 logging.error(
                     f"DeviceMonitor: Pulse connection lost or error: {e}. Retrying in 5s..."
                 )
+                with self.lock:
+                    self.present.clear()
+                    self.indices = {"sink": {}, "source": {}}
                 time.sleep(5)
+            finally:
+                self.fetch_pulse = None
 
     def _callback(self, event):
         if event.t in ["new", "change"]:
             try:
-                # We need to fetch the device info.
-                # Creating a new connection for each event is safest for thread safety
-                # (since the listening connection is busy).
-                with Pulse("nanoKontroller-monitor-fetch") as pulse:
-                    if event.facility == "sink":
-                        try:
-                            info = pulse.sink_info(event.index)
-                            self._handle_new_or_change(info, "sink")
-                        except Exception:
-                            pass
-                    elif event.facility == "source":
-                        try:
-                            info = pulse.source_info(event.index)
-                            self._handle_new_or_change(info, "source")
-                        except Exception:
-                            pass
-                    elif event.facility == "server":
-                        self._handle_server_change(pulse)
+                if event.facility == "sink":
+                    info = self.fetch_pulse.sink_info(event.index)
+                    self._handle_new_or_change(info, "sink")
+                elif event.facility == "source":
+                    info = self.fetch_pulse.source_info(event.index)
+                    self._handle_new_or_change(info, "source")
+                elif event.facility == "server":
+                    self._handle_server_change(self.fetch_pulse)
             except Exception as e:
-                logging.error(f"DeviceMonitor: Error processing event: {e}")
+                # The device may already be gone again by the time we query it
+                logging.debug(f"DeviceMonitor: Error processing event: {e}")
 
         elif event.t == "remove":
             self._handle_remove(event.index, event.facility)
@@ -477,38 +466,48 @@ class DeviceMonitor:
     def _handle_server_change(self, pulse_instance):
         try:
             info = pulse_instance.server_info()
-            default_sink = info.default_sink_name
             with self.lock:
+                self.default_sink_name = info.default_sink_name
                 for actions in self.watched_devices.values():
                     for item in actions:
                         action = item["action"]
                         if hasattr(action, "handle_default_sink_change"):
-                            action.handle_default_sink_change(default_sink)
+                            action.handle_default_sink_change(self.default_sink_name)
         except Exception as e:
             logging.error(f"DeviceMonitor: Error handling server change: {e}")
 
     def _handle_new_or_change(self, device, facility):
         with self.lock:
             self.indices[facility][device.index] = device.name
-            if device.name in self.watched_devices:
-                logging.info(f"Device connected/updated: {device.name}")
-                for item in self.watched_devices[device.name]:
-                    item["action"].set_device(device)
-                    if item["solo_key"]:
-                        self.led_handler.set_led(item["solo_key"], 1)
+            items = self.watched_devices.get(device.name)
+            if not items:
+                return
+
+            # "change" events fire on every volume or mute change, so only treat
+            # the transition from absent to present as a connection
+            is_new = device.name not in self.present
+            if is_new:
+                self.present.add(device.name)
+                logging.info(f"Device connected: {device.name}")
+
+            for item in items:
+                action = item["action"]
+                action.set_device(device)
+                if hasattr(action, "handle_default_sink_change"):
+                    action.handle_default_sink_change(self.default_sink_name)
+                if is_new and item["solo_key"]:
+                    self.led_handler.set_led(item["solo_key"], 1)
 
     def _handle_remove(self, index, facility):
         with self.lock:
-            name = self.indices[facility].get(index)
+            name = self.indices[facility].pop(index, None)
             if name and name in self.watched_devices:
                 logging.info(f"Device disconnected: {name}")
+                self.present.discard(name)
                 for item in self.watched_devices[name]:
                     item["action"].set_device(None)
                     if item["solo_key"]:
                         self.led_handler.set_led(item["solo_key"], 0)
-
-            if index in self.indices[facility]:
-                del self.indices[facility][index]
 
 
 def parse_config(pactl, evdev, uinput, midi_out, config_object, device_monitor):
@@ -535,12 +534,17 @@ def parse_config(pactl, evdev, uinput, midi_out, config_object, device_monitor):
         for application in config_object.options("applications"):
             applications[application] = config_object.get("applications", application)
 
-    # Get initial list of devices to populate valid refs if possible,
-    # but DeviceMonitor will also do this.
-    # We'll just start with None and let Monitor populate.
+    def resolve_programs(aliases, keyname):
+        programs = []
+        for alias in aliases.split(","):
+            program = applications.get(alias)
+            if program is None:
+                logging.warning(f"parse_config: Unknown application {alias} for {keyname}")
+            else:
+                programs.append(program)
+        return programs
 
-    # The current default sync
-    default_sink_name = pactl.server_info().default_sink_name
+    # Devices start out as None and are populated by DeviceMonitor as they appear
 
     # Reset leds
     for led in nano_keys.led_support.value:
@@ -553,7 +557,7 @@ def parse_config(pactl, evdev, uinput, midi_out, config_object, device_monitor):
     for keyname in config_object.options("keymap"):
         try:
             keycode = nano_keys[keyname].value
-        except:
+        except KeyError:
             logging.warning("parse_config: No such key {}".format(keyname))
             continue
 
@@ -563,7 +567,7 @@ def parse_config(pactl, evdev, uinput, midi_out, config_object, device_monitor):
             # Basic evdev key mapping
             try:
                 evdev_action = evdev.ecodes[actions[0]]
-            except:
+            except KeyError:
                 logging.warning("parse_config: Unknown evdev key {}".format(actions[0]))
                 continue
             else:
@@ -583,16 +587,19 @@ def parse_config(pactl, evdev, uinput, midi_out, config_object, device_monitor):
                     pactl=pactl,
                     led_handler=led_handler,
                     led_mode=led_mode,
+                    key=keycode,
                 )
                 action_map[keycode] = action
                 if pa_name:
                     device_monitor.register(pa_name, action)
                 else:
-                    logging.warning(f"Unknown alias {alias} for mute")
+                    logging.warning(f"parse_config: Unknown alias {alias} for {keyname}")
 
             elif actions[0] == "program-mute":
                 # Toggle mute of program
-                programs = [applications[x] for x in actions[1].split(",")]
+                programs = resolve_programs(actions[1], keyname)
+                if not programs:
+                    continue
                 action_map[keycode] = nano_action_program_mute(
                     programs=programs,
                     pactl=pactl,
@@ -623,28 +630,25 @@ def parse_config(pactl, evdev, uinput, midi_out, config_object, device_monitor):
                 if pa_name:
                     device_monitor.register(pa_name, action, solo_key)
                 else:
-                    logging.warning(f"Unknown alias {alias} for volume")
+                    logging.warning(f"parse_config: Unknown alias {alias} for {keyname}")
 
             elif actions[0] == "program-volume":
                 # Change volume of program
                 volume_details = actions[1].split("/", 1)
-                programs = [applications[x] for x in volume_details[0].split(",")]
+                programs = resolve_programs(volume_details[0], keyname)
+                if not programs:
+                    continue
 
-                if len(volume_details) == 1:
-                    # No max volume override
-                    action_map[keycode] = nano_action_program_volume(
-                        programs=programs, pactl=pactl
-                    )
-                else:
-                    # Max volume override
-                    action_map[keycode] = nano_action_program_volume(
-                        programs=programs,
-                        pactl=pactl,
-                        max_level=float(volume_details[1]),
-                    )
+                max_vol = 100.0
+                if len(volume_details) > 1:
+                    max_vol = float(volume_details[1])
+
+                action_map[keycode] = nano_action_program_volume(
+                    programs=programs, pactl=pactl, max_level=max_vol
+                )
 
             elif actions[0] == "default-sink":
-                # Set default sink
+                # Set default sink; the LED follows the current default via DeviceMonitor
                 alias = actions[1]
                 pa_name = alias_map.get(alias)
                 action = nano_action_default_sink(
@@ -653,30 +657,27 @@ def parse_config(pactl, evdev, uinput, midi_out, config_object, device_monitor):
                 action_map[keycode] = action
 
                 if pa_name:
-                    # We can use monitor to update the sink object, but we don't need solo key logic here.
                     device_monitor.register(pa_name, action)
-                    # Note: Original code set LED if it was default.
-                    # We might want to handle that in the monitor or action,
-                    # but 'default-sink' action logic is about *setting* it.
-                    # The LED logic for default sink was: "if sink.name == default_sink_name: led=1"
+                else:
+                    logging.warning(f"parse_config: Unknown alias {alias} for {keyname}")
 
             elif actions[0] == "cycle-default-sink":
                 # Cycle between default sinks
                 aliases = actions[1].split(",")
-                sinks_list = [None] * len(aliases)  # Placeholder
+                sinks_list = [None] * len(aliases)
                 action = nano_action_cycle_default_sink(sinks_list, pactl, led_handler)
                 action_map[keycode] = action
                 led_handler.set_led(led=keycode, value=1)
 
-                # Register each
+                # Register a slot per alias so DeviceMonitor can fill in each sink
                 for i, alias in enumerate(aliases):
                     pa_name = alias_map.get(alias)
                     if pa_name:
-                        # We need a custom way to update the list in the action
-                        # We can define a wrapper or lambda, or just let Monitor handle a generic set_device
-                        # that isn't compatible with list.
-                        # For now, cycle-default-sink robustness is partial.
-                        pass
+                        device_monitor.register(pa_name, nano_sink_slot(action, i))
+                    else:
+                        logging.warning(
+                            f"parse_config: Unknown alias {alias} for {keyname}"
+                        )
 
             elif actions[0] == "exec":
                 # Execute a command
@@ -751,7 +752,8 @@ config_object = configparser.ConfigParser()
 config_object.optionxform = str  # Need case sensitivity
 
 if len(config_object.read(args.config)) == 0:
-    logging.error(f"parse_config: Failed to load config file {args.config}")
+    logging.error(f"Failed to load config file {args.config}")
+    sys.exit(1)
 
 # Open the MIDI objects for the nanKONTROL2 device
 pattern = re.compile(
@@ -765,8 +767,8 @@ for input_dev in mido.get_input_names():
         break
 
 if inport is None:
-    print("nanoKONTROL2 input device not found, exiting.")
-    exit(1)
+    logging.error("nanoKONTROL2 input device not found, exiting.")
+    sys.exit(1)
 
 outport = None
 for output in mido.get_output_names():
@@ -776,14 +778,16 @@ for output in mido.get_output_names():
         break
 
 if outport is None:
-    print("nanoKONTROL2 output device not found, exiting.")
-    exit(1)
+    logging.error("nanoKONTROL2 output device not found, exiting.")
+    sys.exit(1)
 
 # Initialize DeviceMonitor
 device_monitor = DeviceMonitor(led_handler=None)  # led_handler set in parse_config
 
 # Build the actionmap
 action_map = parse_config(pactl, e, ui, outport, config_object, device_monitor)
+if action_map is None:
+    sys.exit(1)
 
 # Start monitor
 device_monitor.start()

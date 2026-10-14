@@ -20,17 +20,31 @@ Features
 Requires
 ========
 
-* PulseAudio for audio control
+* PulseAudio, or PipeWire with `pipewire-pulse`, for audio control
 * MIDO for MIDI control
 * evdev for keyboard events
 * accessible uinput
+
+Arch Linux
+----------
+
+Build and install the package from the included `PKGBUILD`, then enable the user service:
+
+```bash
+makepkg -si
+sudo usermod -aG input <user>
+systemctl --user enable --now nanokontroller.service
+```
+
+Other distributions
+-------------------
 
 ```bash
 apt install python3-dev libasound2-dev
 pip install evdev pulsectl mido python-rtmidi
 echo 'uinput' | sudo tee /etc/modules-load.d/uinput.conf
 sudo cp 50-uinput.rules /etc/udev/rules.d/
-usermod -aG <user> input
+sudo usermod -aG input <user>
 ```
 
 Config
