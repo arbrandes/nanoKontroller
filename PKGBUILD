@@ -2,7 +2,7 @@
 
 pkgname=nanokontroller-git
 _pkgname=nanokontroller
-pkgver=0.1.0.r26.d80f95b
+pkgver=0.1.0.r28.9c10453
 pkgrel=1
 pkgdesc="Python app to turn the controllers on a Korg nanoKONTROL2 device into user actions on Linux"
 arch=('any')
